@@ -38,6 +38,7 @@ import (
 	esv1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1"
 	esv1alpha1 "github.com/external-secrets/external-secrets/apis/externalsecrets/v1alpha1"
 	genv1alpha1 "github.com/external-secrets/external-secrets/apis/generators/v1alpha1"
+	"github.com/external-secrets/external-secrets/generators/v1/postgresql"
 	"github.com/external-secrets/external-secrets/pkg/controllers/clusterexternalsecret"
 	"github.com/external-secrets/external-secrets/pkg/controllers/clusterexternalsecret/cesmetrics"
 	"github.com/external-secrets/external-secrets/pkg/controllers/clusterpushsecret"
@@ -45,6 +46,7 @@ import (
 	ctrlcommon "github.com/external-secrets/external-secrets/pkg/controllers/common"
 	"github.com/external-secrets/external-secrets/pkg/controllers/externalsecret"
 	"github.com/external-secrets/external-secrets/pkg/controllers/externalsecret/esmetrics"
+	"github.com/external-secrets/external-secrets/pkg/controllers/generator"
 	"github.com/external-secrets/external-secrets/pkg/controllers/generatorstate"
 	ctrlmetrics "github.com/external-secrets/external-secrets/pkg/controllers/metrics"
 	"github.com/external-secrets/external-secrets/pkg/controllers/pushsecret"
@@ -53,6 +55,7 @@ import (
 	"github.com/external-secrets/external-secrets/pkg/controllers/secretstore/cssmetrics"
 	"github.com/external-secrets/external-secrets/pkg/controllers/secretstore/ssmetrics"
 	"github.com/external-secrets/external-secrets/runtime/feature"
+	"github.com/external-secrets/external-secrets/runtime/scheduler"
 
 	// To allow using gcp auth.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -241,7 +244,25 @@ var rootCmd = &cobra.Command{
 			setupLog.Error(err, errCreateController, "controller", "GeneratorState")
 			os.Exit(1)
 		}
-		if err = (&externalsecret.Reconciler{
+
+		allGenericGenerators := genv1alpha1.GetAllGeneric()
+
+		for kind, genericGenerator := range allGenericGenerators {
+			if err = (&generator.Reconciler{
+				Client:     mgr.GetClient(),
+				Log:        ctrl.Log.WithName("controllers").WithName("Generator"),
+				Scheme:     mgr.GetScheme(),
+				RestConfig: mgr.GetConfig(),
+				Kind:       kind,
+			}).SetupWithManager(mgr, genericGenerator, controller.Options{
+				MaxConcurrentReconciles: concurrent,
+				RateLimiter:             ctrlcommon.BuildRateLimiter(),
+			}); err != nil {
+				setupLog.Error(err, errCreateController, "controller", "Generator")
+				os.Exit(1)
+			}
+		}
+		externalSecretReconciler := &externalsecret.Reconciler{
 			Client:                    mgr.GetClient(),
 			SecretClient:              secretClient,
 			Log:                       ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
@@ -253,7 +274,8 @@ var rootCmd = &cobra.Command{
 			EnableFloodGate:           enableFloodGate,
 			EnableGeneratorState:      enableGeneratorState,
 			AllowGenericTargets:       allowGenericTargets,
-		}).SetupWithManager(cmd.Context(), mgr, controller.Options{
+		}
+		if err = externalSecretReconciler.SetupWithManager(cmd.Context(), mgr, controller.Options{
 			MaxConcurrentReconciles: concurrent,
 			RateLimiter:             ctrlcommon.BuildRateLimiter(),
 		}); err != nil {
@@ -294,6 +316,18 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		sched := scheduler.New(mgr.GetClient(), ctrl.Log.WithName("scheduler"))
+		if err := mgr.Add(sched); err != nil {
+			setupLog.Error(err, "unable to add scheduler")
+			os.Exit(1)
+		}
+		scheduler.SetGlobal(sched)
+
+		pgBootstrap := postgresql.NewBootstrap(mgr.GetClient(), mgr)
+		if err := mgr.Add(pgBootstrap); err != nil {
+			setupLog.Error(err, "unable to add postgresql bootstrap")
+			os.Exit(1)
+		}
 		if enableClusterPushSecretReconciler {
 			cpsmetrics.SetUpMetrics()
 

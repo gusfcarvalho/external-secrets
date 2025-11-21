@@ -81,4 +81,5 @@ webhooks:
   sideEffects: None
   timeoutSeconds: 5
   failurePolicy: {{ .Values.webhook.failurePolicy}}
+---
 {{- end }}
